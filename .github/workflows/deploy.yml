@@ -14,14 +14,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  deploy:
     runs-on: ubuntu-latest
     environment: production
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     env:
       AWS_REGION: us-east-1
       ECR_REPO: ${{ vars.ECR_REPO }}
+      STACK_NAME: practice7-app
 
     steps:
       - name: Checkout code
@@ -81,9 +82,67 @@ jobs:
           exit 1
 
       - name: Push image to ECR
-        run: docker push "$ECR_REPO:$GITHUB_SHA"
-
-      - name: Write run summary
+        shell: bash
         run: |
-          echo "### Image published" >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+
+          EXISTING=$(aws ecr describe-images \
+            --repository-name practice7-web \
+            --query "imageDetails[?contains(imageTags || \`[]\`, '$GITHUB_SHA')].imageDigest" \
+            --output text)
+
+          if [ -n "$EXISTING" ]; then
+            echo "Image already exists for this commit; keeping immutable image."
+          else
+            docker push "$ECR_REPO:$GITHUB_SHA"
+          fi
+
+      - name: Deploy with CloudFormation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws cloudformation deploy \
+            --region "$AWS_REGION" \
+            --stack-name "$STACK_NAME" \
+            --template-file infra/app.yaml \
+            --parameter-overrides ImageTag="$GITHUB_SHA" \
+            --no-fail-on-empty-changeset
+
+      - name: Verify deployed application
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_URL=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='AppUrl'].OutputValue | [0]" \
+            --output text)
+
+          curl --fail --silent --show-error \
+            --retry 10 --retry-delay 3 --retry-all-errors \
+            --connect-timeout 5 --max-time 10 \
+            "$APP_URL/health" --output health.json
+
+          python -c 'import json; assert json.load(open("health.json"))["status"] == "ok"'
+
+          curl --fail --silent --show-error \
+            --retry 10 --retry-delay 3 --retry-all-errors \
+            --connect-timeout 5 --max-time 10 \
+            "$APP_URL/" --output deployed.json
+
+          python -c 'import json,os; data=json.load(open("deployed.json")); print(data); assert data["version"] == os.environ["GITHUB_SHA"], "Deployed version does not match commit"'
+
+          echo "### Deployment successful" >> "$GITHUB_STEP_SUMMARY"
+          echo "Application: $APP_URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "Commit: $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
           echo "Image: $ECR_REPO:$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Show stack events on failure
+        if: failure()
+        run: |
+          aws cloudformation describe-stack-events \
+            --stack-name "$STACK_NAME" \
+            --max-items 15 \
+            --query 'StackEvents[].{Resource:LogicalResourceId,Status:ResourceStatus,Reason:ResourceStatusReason}' \
+            --output table
