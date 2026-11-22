@@ -1,0 +1,75 @@
+name: Practice 7 CI/CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: practice7-production
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 15
+
+    env:
+      AWS_REGION: us-east-1
+      ECR_REPO: ${{ vars.ECR_REPO }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run unit tests
+        run: python -m unittest discover -v
+
+      - name: Authenticate to AWS with OIDC
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws ecr get-login-password --region "$AWS_REGION" \
+            | docker login --username AWS --password-stdin "${ECR_REPO%%/*}"
+
+      - name: Build image
+        run: |
+          docker build \
+            --build-arg APP_VERSION="$GITHUB_SHA" \
+            --tag "$ECR_REPO:$GITHUB_SHA" .
+
+      - name: Test container health
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name practice7-test \
+            -p 127.0.0.1:8080:8080 "$ECR_REPO:$GITHUB_SHA"
+          trap 'docker logs practice7-test; docker rm -f practice7-test' EXIT
+          curl --fail --silent --show-error \
+            --retry 10 --retry-delay 2 --retry-connrefused \
+            http://127.0.0.1:8080/health \
+            | python -c 'import json,sys; assert json.load(sys.stdin)["status"] == "ok"'
+
+      - name: Push image to ECR
+        run: docker push "$ECR_REPO:$GITHUB_SHA"
+
+      - name: Write run summary
+        run: |
+          echo "### Image published" >> "$GITHUB_STEP_SUMMARY"
+          echo "Image: $ECR_REPO:$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
