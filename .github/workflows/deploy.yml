@@ -58,13 +58,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           docker run -d --name practice7-test \
             -p 127.0.0.1:8080:8080 "$ECR_REPO:$GITHUB_SHA"
+
           trap 'docker logs practice7-test; docker rm -f practice7-test' EXIT
-          curl --fail --silent --show-error \
-            --retry 10 --retry-delay 2 --retry-connrefused \
-            http://127.0.0.1:8080/health \
-            | python -c 'import json,sys; assert json.load(sys.stdin)["status"] == "ok"'
+
+          for attempt in {1..15}; do
+            if curl --fail --silent --show-error \
+              --connect-timeout 2 --max-time 3 \
+              http://127.0.0.1:8080/health \
+              --output health.json; then
+              python -c 'import json; assert json.load(open("health.json"))["status"] == "ok"'
+              exit 0
+            fi
+
+            echo "Waiting for container: attempt $attempt/15"
+            sleep 2
+          done
+
+          echo "Container did not become healthy"
+          exit 1
 
       - name: Push image to ECR
         run: docker push "$ECR_REPO:$GITHUB_SHA"
