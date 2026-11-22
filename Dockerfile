@@ -1,0 +1,16 @@
+FROM public.ecr.aws/docker/library/python:3.12-slim
+
+WORKDIR /app
+
+ARG APP_VERSION=local
+ENV APP_VERSION=${APP_VERSION}
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+COPY app.py .
+
+USER 10001:10001
+
+EXPOSE 8080
+
+CMD ["python", "app.py"]
