@@ -6,7 +6,7 @@ class AppTests(unittest.TestCase):
     def test_health(self):
         status, body = response_for("/health")
         self.assertEqual(status, 200)
-        self.assertEqual(body["status"], "broken")
+        self.assertEqual(body["status"], "ok")
 
     def test_home(self):
         status, body = response_for("/")
